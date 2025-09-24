@@ -1,0 +1,93 @@
+model:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Fine-tuning VAE-GAN with Bi-Conditional FiLM (Encoder + Decoder)
+  # Goal: Load Generator weights, Reset Discriminator & ALL FiLM layers.
+  # Condition Encoder on Source Voxel Size, Decoder on Target Voxel Size.
+  # ─────────────────────────────────────────────────────────────────────────
+  base_learning_rate: 4.5e-4   # Keep reduced LR for Generator Fine-tuning
+
+  target: taming.models.autoencoders.AutoencoderKL3DV5 # <<< Point to NEW BiCond Autoencoder
+
+  params:
+    monitor: val_rec_loss
+    embed_dim: 1              # Must match original checkpoint
+    load_pretrained_weights_mode: "both" # "both" or "generator". Trained originally with generator only with warmup of 1000 iterations of only discriminator
+    ddconfig: # Generator structure - MUST match the loaded checkpoint's generator CORE
+      double_z: True
+      z_channels: 1
+      resolution: 192
+      in_channels: 1
+      out_ch: 1
+      ch: 64
+      ch_mult: [1, 2, 4]
+      resizing_pos: [1, 0, 0]
+      num_res_blocks: 2
+      attn_resolutions: []
+      dropout: 0.0
+      # cond dims are passed via Autoencoder params now
+
+    lossconfig:
+      target: taming.modules.losses.contperceptual.LPIPSWithDiscriminator3D_v8_3
+      params:
+        disc_conditional: False
+        disc_in_channels: 1
+        disc_start: 00            # Start discriminator immediately
+        # --- Discriminator Architecture (built from scratch) ---
+        num_channels: 64         # Increased ndf
+        disc_num_layers: 3      # Increased layers
+        # --- End Discriminator Arch ---
+        perceptual_on_cpu: False
+        kl_weight: 1.0e-08
+        disc_weight: 1e-1
+        adaptweight_clamp_to: 0.1
+        pixelloss_weight: 0.2    # L1 off
+        perceptual_weight: 2.0   # LPIPS x2
+
+    trainconfig:
+      ae_mode: 'deg2gt'
+      downscaling_factors: [1, 2, 3]
+      accumulate_grad_batches_g: 2
+      accumulate_grad_batches_d: 2
+      lr_ratio_gtod: 0.5       # Discriminator learns 10x faster
+
+      generator_update_frequency: 1
+      discriminator_update_frequency: 4 
+      # --- Warm-up Control ---
+      generator_warmup_steps: 0 # No need to warmup since we are resuming from the previous one (previous value 1000)
+      discriminator_warmup_steps: 0  # Starts right away
+
+
+
+# --- Data Config --- (Should remain the same)
+data:
+  target: main_hdf5_3d_v6_5.DataModuleFromConfig3D
+  # ... (keep identical to original) ...
+  params:
+    batch_size: 1
+    num_workers: 1
+    lazy_loading: False
+    crop_size: [160, 32, 160]
+    train:
+      target: main_hdf5_3d_v6_5.AsegDatasetWithAugmentation3D_v2
+      params:
+        dataset_paths_files:
+          - /home/walterag/projects/def-zeighami/walterag/superresolution/datasets/RAVEN_LDM_3D_v4_aniso/train_3D_v4_aniso.txt
+          # - /data/dadmah/gonwal2/Documents/SuperResolution/datasets/RAVEN_LDM_3D_v4_aniso/train_3D_v4_aniso.txt
+    validation:
+      target: main_hdf5_3d_v6_5.AsegDatasetWithAugmentation3D_v2
+      params:
+        dataset_paths_files:
+          - /home/walterag/projects/def-zeighami/walterag/superresolution/datasets/RAVEN_LDM_3D_v4_aniso/val_3D_v4_aniso.txt
+          #- /data/dadmah/gonwal2/Documents/SuperResolution/datasets/RAVEN_LDM_3D_v4_aniso/val_3D_v4_aniso.txt
+        transforms: null
+
+# --- Lightning Config --- (Should remain mostly the same)
+lightning:
+  trainer:
+    max_epochs: 200            # Reduced epochs for initial fine-tuning test
+    precision: bf16-mixed
+    accelerator: gpu
+    devices: -1
+    strategy: 'ddp_find_unused_parameters_true'
+    #val_check_interval: 1000  # Run validation every 1000 training steps
+    #limit_val_batches: 0.1
